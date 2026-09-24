@@ -157,3 +157,43 @@ Subject: ARC chain demo
 Message-ID: <arc-demo@example.com>
 """
 
+
+# DKIM h= 覆盖审计示例（自头部顶部到底部）：
+# - 两条嵌套 DKIM-Signature：外部转发方（d=relay.provider.example，pos 1）
+#   与原始发件域（d=example.com，pos 4），h= 均折行书写；
+# - 外部签名 h= 列出三次 Received（实际正好三个，按“从底部向上、各自
+#   消费不同副本”逐一覆盖，重复字段名不合并）；To 列了两次但只有一个
+#   实际 To → 第二个 To 为未匹配 h 项；
+# - pos 2 多出一个 Subject（转发后追加 / 疑似注入）：两条签名从底部
+#   向上匹配时都先消费 pos 10 的原始 Subject，pos 2 成为各自“未覆盖的
+#   实际副本”（对内部签名它还位于签名上方）；
+# - 内部签名 h= 包含 Content-Type，但头部中没有该字段 → 未匹配 h 项。
+SAMPLE_HEADERS_DKIM = """\
+DKIM-Signature: v=1; a=rsa-sha256; d=relay.provider.example;
+\ts=relay2026; c=relaxed/relaxed; t=1790216200;
+\th=From:Subject:To:To:Date:Received:Received:Received;
+\tbh=cmVsYXlwbGFjZWhvbGRlcg==;
+\tb=UmVsYXlGb3J3YXJkZXJT aWduYXR1cmU=
+Subject: Urgent: please update payment details
+Received: from mx.final.example (mx.final.example [198.51.100.10])
+\tby relay.provider.example with ESMTPS id 7C3D91
+\tfor <user@final.example>; Thu, 24 Sep 2026 02:14:30 +0000
+DKIM-Signature: v=1; a=rsa-sha256; d=example.com; s=sel2026;
+\tc=relaxed/relaxed; t=1790216080;
+\th=From:To:Subject:Date:Received:Received:Content-Type;
+\tbh=b3JpZ2luYWxib2R5aGFzaA==;
+\tb=T3JpZ2luYWxBdXRob3JT aWduYXR1cmU=
+Received: from outgoing.example.org (outgoing.example.org [192.0.2.50])
+\tby mx.final.example with ESMTP id 44AB8
+\tfor <user@final.example>; Thu, 24 Sep 2026 02:14:00 +0000
+Received: from smtp01.corp.example.net (smtp01.corp.example.net [10.10.0.5])
+\tby outgoing.example.org with ESMTP id 88FF21
+\tfor user@final.example; Thu, 24 Sep 2026 02:01:00 +0000
+Date: Thu, 24 Sep 2026 02:00:00 +0000
+From: Sender <sender@example.com>
+To: User <user@final.example>
+Subject: Monthly newsletter
+Message-ID: <dkim-demo@example.com>
+"""
+
+

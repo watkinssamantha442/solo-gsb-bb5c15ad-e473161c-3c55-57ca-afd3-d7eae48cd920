@@ -33,6 +33,16 @@
   折行与标签书写顺序变化不影响识别；完全没有 ARC 字段时报告
   **“无 ARC 链”**（不判定通过）。页面粘贴检查或调用
   `POST /api/arc/check`（输入 `headers` 字符串，返回同结构 JSON）。
+- **DKIM 头字段覆盖审计**（RFC 6376）：复用同一套折行展开，逐条读取
+  每条 `DKIM-Signature` 的 `h=` 列表，**每条签名独立**按列表顺序
+  **从头部底部向上**为同名项匹配该签名**尚未使用**的实际字段并记录
+  字段位置；重复字段名（如多个 `Received`）按列表位置逐条对应，
+  **不按集合合并**。页面与 `POST /api/dkim/coverage` 展示每条签名的
+  逐项匹配结果、未匹配的 `h=` 项，以及 `From` / `Subject` / `To` /
+  `Date` 中未被该签名覆盖的实际副本（含相对签名上 / 下方位置）；
+  没有 `DKIM-Signature` 时返回独立的“无 DKIM 签名”状态，缺失或空
+  `h=` 标为异常。审计**只表示字段覆盖**，不验证 `b=` / 域名 / 密钥，
+  **不宣称签名真伪或验证是否通过**。
 
 解析核心（`mailtrace/`）仅依赖 Python 标准库，可脱离 Flask 单独使用或被其他程序导入。
 
@@ -88,6 +98,14 @@ docker build -t mailtrace . && docker run --rm -p 8000:8000 mailtrace
    ARC 链），点击 **检查 ARC 链**：页面展示总状态、每个实例的三类字段
    齐全性与 Seal `cv` 校验结果，并对非法 `i`、字段重复 / 缺失、跳号、
    `cv` 异常逐项定位。
+7. 需要审计 **DKIM 签名覆盖了哪些头字段**时，把含 `DKIM-Signature`
+   的原始头部粘贴到 **“DKIM 头字段覆盖审计（h=）”** 文本框
+   （可点“填入示例”，内含两条嵌套签名、重复 `Received` / `To`、
+   签名后追加的 `Subject` 等情形），点击 **审计 DKIM h= 覆盖**：
+   页面按签名逐条展示 `h=` 列表每项匹配到的实际字段位置、未匹配项，
+   以及 `From` / `Subject` / `To` / `Date` 的未覆盖实际副本；
+   没有签名时显示独立的“无 DKIM 签名”状态，缺失或空 `h=` 会标为
+   异常。结果只表示字段覆盖，不宣称签名真伪。
 
 慢段归因的聚合口径：
 
@@ -290,6 +308,79 @@ curl -s -X POST http://localhost:8000/api/arc/check \
   `MAX_INPUT_KB` 上限返回 400；头部中完全没有 ARC 字段时返回 200 且
   `status` 为 `none`。
 
+DKIM 头字段覆盖审计（本地启动后页面地址 `http://localhost:8000/`，
+API 地址 `http://localhost:8000/api/dkim/coverage`，
+端口随 `HOST_PORT` 变化，见下文“访问端口”）：
+
+```bash
+curl -s -X POST http://localhost:8000/api/dkim/coverage \
+  -H 'Content-Type: application/json' \
+  -d '{"headers": "DKIM-Signature: d=example.com; s=sel; h=From:Subject:Date; b=...\nDate: ...\nFrom: ...\nSubject: ..."}'
+```
+
+返回结构与页面共用同一结果。完全没有 `DKIM-Signature` 时
+`status` 为独立状态 `none`（`signature_count` 为 0，不审计也不判通过）；
+有签名时 `status` 为 `audited`，`signatures` 数组每条签名独立给出结果：
+
+```json
+{
+  "status": "audited",
+  "status_label": "已完成 h= 覆盖审计",
+  "signature_count": 1,
+  "anomaly_count": 0,
+  "signatures": [
+    {
+      "position": 1,
+      "domain": "example.com",
+      "selector": "sel",
+      "h_entries": ["From", "Subject", "Date"],
+      "h_count": 3,
+      "matched_count": 2,
+      "anomalies": [],
+      "matches": [
+        {"index": 0, "name": "From", "matched": true, "position": 3,
+         "relative": "below", "relative_label": "签名下方", "value": "a@b.c"},
+        {"index": 1, "name": "Subject", "matched": false,
+         "position": null, "relative": null, "relative_label": null, "value": null},
+        {"index": 2, "name": "Date", "matched": true, "position": 2,
+         "relative": "below", "relative_label": "签名下方", "value": "Tue, …"}
+      ],
+      "unmatched_entries": [
+        {"index": 1, "name": "Subject", "matched": false,
+         "position": null, "relative": null, "relative_label": null, "value": null}
+      ],
+      "uncovered_targets": [
+        {"field": "Subject", "total_count": 1, "uncovered_count": 1,
+         "copies": [{"position": 4, "relative": "above",
+                     "relative_label": "签名上方", "value": "injected later"}]}
+      ],
+      "target_uncovered_count": 1,
+      "raw": "DKIM-Signature: d=example.com; …"
+    }
+  ],
+  "note": "审计结果仅表示 h= 列表对实际头字段的覆盖情况，不验证 b= 签名、域名与密钥，不宣称 DKIM 签名真伪或验证是否通过。"
+}
+```
+
+- 匹配规则（RFC 6376）：每条签名独立按 `h=` 列表顺序，**从头部底部
+  向上**选取该签名尚未使用的第一条同名实际字段；每个实际字段最多
+  被消费一次——因此 `h=` 中重复的字段名（如多个 `Received`）会逐条
+  对应到不同副本，**不会按集合合并**；
+- `matches[].position` 为实际字段在头部自上而下的 1 起位置，
+  `relative` 为 `above`（签名上方）/ `below`（签名下方），
+  签名之后追加 / 疑似注入的字段会落在下方且不出现在覆盖中；
+  匹配池不含本条 `DKIM-Signature` 自身，但含其上方的嵌套
+  `DKIM-Signature`；
+- `unmatched_entries` 是 `h=` 列出但头部中已无可用同名字段的项；
+  `uncovered_targets` 逐条列出 `From` / `Subject` / `To` / `Date`
+  中未被该签名覆盖的实际副本（重复字段不合并计数）；
+- 签名缺少 `h=`、`h=` 为空时在 `anomalies` 中以 `missing_h` /
+  `empty_h` 标记（`h=` 标签重复时为 `duplicate_h`），异常签名不执行
+  匹配以免给出误导性覆盖结论；
+- 输入限制与报错方式和其他接口一致：`headers` 必须是字符串，
+  空白输入或超过 `MAX_INPUT_KB` 上限返回 400；完全没有
+  `DKIM-Signature` 时返回 200 且 `status` 为 `none`。
+
 健康检查：`GET http://localhost:8000/healthz`。
 
 ---
@@ -369,18 +460,20 @@ python -m unittest discover -s tests -v
 │       ├── batch.py        # 多封慢段归因：相邻节点对聚合、中位/最大耗时、排除计数
 │       ├── share.py        # 单封脱敏分享：H1/IP1 别名化、白名单报告
 │       ├── arc.py          # ARC 链结构检查：i 标签归组、字段齐全性、连续编号、cv 校验
-│       └── sample.py       # 页面“填入示例”数据（A / B 两份、多封批量三份及 ARC 示例）
+│       ├── dkim.py         # DKIM h= 覆盖审计：自底部向上逐条匹配、未覆盖副本定位
+│       └── sample.py       # 页面“填入示例”数据（A / B 两份、多封批量三份、ARC 与 DKIM 示例）
 ├── wsgi.py                 # gunicorn / flask 启动入口
 ├── entrypoint.sh           # 容器启动时安装依赖并启动 gunicorn
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
-└── tests/                  # 解析核心、对照、脱敏、慢段归因与 ARC 链单元测试
+└── tests/                  # 解析核心、对照、脱敏、慢段归因、ARC 链与 DKIM 覆盖单元测试
     ├── test_parser.py
     ├── test_compare.py
     ├── test_share.py
     ├── test_batch.py
-    └── test_arc.py
+    ├── test_arc.py
+    └── test_dkim.py
 ```
 
 ## 安全与隐私
