@@ -8,6 +8,7 @@ from flask import Flask, jsonify, render_template, request
 
 from mailtrace.parsing import (
     analyze_headers,
+    audit_dkim_coverage,
     batch_delay_analysis,
     build_share_report,
     check_arc_chain,
@@ -19,6 +20,7 @@ from mailtrace.parsing.sample import (
     SAMPLE_HEADERS_ARC,
     SAMPLE_HEADERS_B,
     SAMPLE_HEADERS_BATCH,
+    SAMPLE_HEADERS_DKIM,
 )
 
 
@@ -45,6 +47,7 @@ def create_app() -> Flask:
             "sample_b": SAMPLE_HEADERS_B,
             "sample_batch": SAMPLE_HEADERS_BATCH,
             "sample_arc": SAMPLE_HEADERS_ARC,
+            "sample_dkim": SAMPLE_HEADERS_DKIM,
             "max_input_kb": max_input_kb,
         }
         context.update(extra)
@@ -114,6 +117,14 @@ def create_app() -> Flask:
             }
         return check_arc_chain(raw_headers)
 
+    def _do_dkim_coverage(raw_headers: str) -> dict:
+        error = _check_size(raw_headers)
+        if error:
+            return {"error": error}
+        if not raw_headers.strip():
+            return {"error": "请先粘贴邮件原始头部（包含 DKIM-Signature 字段）"}
+        return audit_dkim_coverage(raw_headers)
+
     @app.post("/analyze")
     def analyze_form():
         raw_headers = request.form.get("headers_a", "") or request.form.get("headers", "")
@@ -161,6 +172,12 @@ def create_app() -> Flask:
         raw_headers = request.form.get("headers_arc", "")
         arc = _do_arc_check(raw_headers)
         return render_index(headers_arc=raw_headers, arc=arc)
+
+    @app.post("/dkim-coverage")
+    def dkim_coverage_form():
+        raw_headers = request.form.get("headers_dkim", "")
+        dkim = _do_dkim_coverage(raw_headers)
+        return render_index(headers_dkim=raw_headers, dkim=dkim)
 
     @app.post("/api/analyze")
     def analyze_api():
@@ -235,6 +252,19 @@ def create_app() -> Flask:
         if not isinstance(raw_headers, str):
             return jsonify({"error": "headers 必须是字符串"}), 400
         result = _do_arc_check(raw_headers)
+        status = 400 if result.get("error") else 200
+        return jsonify(result), status
+
+    @app.post("/api/dkim/coverage")
+    def dkim_coverage_api():
+        if request.is_json:
+            payload = request.get_json(silent=True) or {}
+            raw_headers = payload.get("headers", "")
+        else:
+            raw_headers = request.form.get("headers", "")
+        if not isinstance(raw_headers, str):
+            return jsonify({"error": "headers 必须是字符串"}), 400
+        result = _do_dkim_coverage(raw_headers)
         status = 400 if result.get("error") else 200
         return jsonify(result), status
 

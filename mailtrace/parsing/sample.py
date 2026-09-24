@@ -157,3 +157,39 @@ Subject: ARC chain demo
 Message-ID: <arc-demo@example.com>
 """
 
+# DKIM 头字段覆盖审计示例：两条 DKIM-Signature（由后到先的中继依次在顶部
+# 追加，因此原文中转发方签名写在原始签名之前），字段名大小写与折行不影响解析。
+# - 签名 2（example.com，第 2 个字段）h= 里 Received 出现两次：按 RFC 6376
+#   自底部向上匹配，分别命中第 4、第 3 个字段（两个 Received 副本），
+#   重复字段名不按集合合并；From/To/Subject/Date 各匹配一次。
+# - 签名 1（forwarder.example，顶部字段）对第 2 条签名做了 countersignature
+#   （h= 中含 dkim-signature，自底部向上命中第 2 条签名而不会匹配自身），
+#   但未覆盖 To 与 Date，且多写了一个不存在的 X-Missing 字段。
+# - To 有两个实际副本：转发时被注入到顶部的 extra-injected（第 7 个字段）
+#   与原始的 User（第 8 个字段）；两条签名的 h= 都只有一个 To，自底部向上
+#   命中原始副本后，被注入的第 7 个副本对每条签名都显示为“未覆盖”。
+SAMPLE_HEADERS_DKIM = """\
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+\td=forwarder.example; s=sel2; t=1790216000;
+\tbh=Rm9yd2FyZGVyQm9keUhhc2g=;
+\th=Received:Received:DKIM-Signature:From:Subject:X-Missing;
+\tb=Rm9yd2FyZGVyU2lnbmF0dXJl
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+\td=example.com; s=sel1; t=1790215940;
+\tbh=T3JpZ2luYWxCb2R5SGFzaA==;
+\th=Received:Received:From:To:Subject:Date:Message-ID;
+\tb=T3JpZ2luYWxTaWduYXR1cmU=
+Received: from mx.forwarder.example (mx.forwarder.example [198.51.100.8])
+\tby gateway.final.example with ESMTPS id F9E8D7
+\tfor <user@final.example>; Thu, 24 Sep 2026 02:13:30 +0000
+Received: from relay.provider.example (relay.provider.example [203.0.113.22])
+\tby mx.forwarder.example with ESMTPS id C6B5A4
+\tfor <user@final.example>; Thu, 24 Sep 2026 02:13:00 +0000
+Date: Thu, 24 Sep 2026 02:12:40 +0000
+From: Sender <sender@example.com>
+To: extra-injected@evil.example
+To: User <user@final.example>
+Subject: DKIM coverage demo
+Message-ID: <dkim-demo@example.com>
+"""
+

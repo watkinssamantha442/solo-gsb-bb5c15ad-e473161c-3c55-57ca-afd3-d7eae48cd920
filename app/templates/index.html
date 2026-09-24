@@ -208,6 +208,38 @@
   }
   .pill strong { color: var(--warn); }
   .section-title { margin: 36px 0 12px; font-size: 18px; }
+
+  /* DKIM h= 头字段覆盖 */
+  table.dkim {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; overflow: hidden; margin-top: 8px;
+  }
+  table.dkim th, table.dkim td {
+    padding: 8px 12px; text-align: left; vertical-align: top;
+    border-bottom: 1px solid var(--line);
+  }
+  table.dkim thead th {
+    background: var(--panel-2); color: var(--muted);
+    font-size: 12.5px; white-space: nowrap;
+  }
+  table.dkim tbody tr:last-child td { border-bottom: 0; }
+  table.dkim td.pos { white-space: nowrap; font-weight: 600; }
+  table.dkim td.val { word-break: break-all; }
+  .hchip {
+    display: inline-block; border-radius: 6px; padding: 1px 9px;
+    margin: 2px 4px 2px 0; font: 12px/1.7 ui-monospace, Menlo, Consolas,
+      monospace; border: 1px solid var(--line); background: var(--panel-2);
+  }
+  .hchip.match { border-color: var(--ok); color: var(--ok); }
+  .hchip.miss { border-color: var(--error); color: var(--error); }
+  .sig-meta { color: var(--muted); font-size: 12.5px; margin: 2px 0 8px; }
+  .sig-meta code { font-size: 12px; }
+  .dkim-notice {
+    background: #172b3a; border: 1px solid var(--accent);
+    color: #bae6fd; border-radius: 10px; padding: 10px 14px;
+    margin: 12px 0 0; font-size: 13px;
+  }
 </style>
 </head>
 <body>
@@ -258,6 +290,27 @@
       <button class="btn-ghost" type="button" id="fillArcSample">填入示例</button>
       <button class="btn-ghost" type="button" id="clearArc">清空</button>
       <span class="hint" style="align-self:center;">也可调用 <code>POST /api/arc/check</code>（JSON：<code>{"headers": "..."}</code>）</span>
+    </div>
+  </form>
+
+  <h2 class="section-title">✍️ DKIM 头字段覆盖审计</h2>
+  <p class="subtitle" style="margin-bottom:10px;">
+    粘贴含 <code>DKIM-Signature</code> 的邮件原始头部，系统复用同一套折行展开，
+    逐条读取每条签名的 <code>h=</code> 列表，并<strong>独立地</strong>按列表顺序、
+    从头部底部向上为同名项匹配尚未使用的实际字段（重复字段名不按集合合并，
+    依据 RFC 6376）。展示每条签名的匹配结果与字段位置、未匹配的 <code>h=</code> 项，
+    以及 <code>From</code> / <code>Subject</code> / <code>To</code> / <code>Date</code>
+    中未被该签名覆盖的实际副本。无签名时单独报告；缺失或空 <code>h=</code> 标为异常。
+    结果<strong>只表示字段覆盖，不宣称签名真伪</strong>。
+  </p>
+  <form method="post" action="/dkim-coverage" id="dkimForm">
+    <textarea name="headers_dkim" id="headers_dkim" style="min-height:200px;"
+      placeholder="DKIM-Signature: v=1; d=example.com; s=sel; h=From:To:Subject:Date; b=...&#10;Received: ...&#10;From: ...&#10;To: ...&#10;Subject: ...&#10;Date: ...">{{ headers_dkim or '' }}</textarea>
+    <div class="toolbar">
+      <button class="btn-primary" type="submit">审计 DKIM 覆盖</button>
+      <button class="btn-ghost" type="button" id="fillDkimSample">填入示例</button>
+      <button class="btn-ghost" type="button" id="clearDkim">清空</button>
+      <span class="hint" style="align-self:center;">也可调用 <code>POST /api/dkim/coverage</code>（JSON：<code>{"headers": "..."}</code>）</span>
     </div>
   </form>
 
@@ -376,11 +429,145 @@
     {% endif %}
   {% endif %}
 
+  {% if dkim %}
+    {% if dkim.error %}
+      <div class="banner">{{ dkim.error }}</div>
+    {% else %}
+      <h2 style="font-size:18px;">DKIM 头字段覆盖审计结果</h2>
+      <div class="stats">
+        <div class="stat">
+          <div class="num {% if dkim.status == 'ok' %}ok{% elif dkim.status == 'anomaly' %}error{% endif %}">{{ dkim.status_label }}</div>
+          <div class="label">总状态</div>
+        </div>
+        <div class="stat"><div class="num">{{ dkim.signature_count }}</div><div class="label">DKIM 签名数</div></div>
+        <div class="stat"><div class="num {% if dkim.anomaly_count %}error{% endif %}">{{ dkim.anomaly_count }}</div><div class="label">异常签名（缺 / 空 h=）</div></div>
+        <div class="stat"><div class="num">{{ dkim.header_field_count }}</div><div class="label">头部字段总数</div></div>
+      </div>
+
+      {% if dkim.status == 'none' %}
+        <div class="banner">{{ dkim.notice }}</div>
+      {% else %}
+        {% for sig in dkim.signatures %}
+        <div class="hop">
+          <div class="hop-head">
+            <span class="hop-idx">#{{ sig.index }}</span>
+            <span class="hop-node">DKIM 签名 {{ sig.index }}</span>
+            {% if sig.status == 'ok' %}<span class="tag added">h= 正常</span>{% else %}<span class="tag missing">h= 异常</span>{% endif %}
+            <span class="hint">DKIM-Signature 位于第 {{ sig.field_position }} 个字段</span>
+          </div>
+          <div class="sig-meta">
+            {% if sig.domain %}<span class="k">d=</span><code>{{ sig.domain }}</code>{% endif %}
+            {% if sig.selector %}<span class="k" style="margin-left:14px;">s=</span><code>{{ sig.selector }}</code>{% endif %}
+            <span style="margin-left:14px;">h= 项 {{ sig.h_count }} ·
+              <span class="diff-ok">匹配 {{ sig.matched_count }}</span> ·
+              <span class="{% if sig.unmatched_count %}time-bad{% else %}hint{% endif %}">未匹配 {{ sig.unmatched_count }}</span>
+            </span>
+          </div>
+
+          {% if sig.issues %}
+          <ul class="anomalies">
+            {% for iss in sig.issues %}
+            <li class="error">⛔ {{ iss.message }}</li>
+            {% endfor %}
+          </ul>
+          {% endif %}
+
+          {% if sig.h_results %}
+          <div style="margin:8px 0 2px;"><span class="hint">h= 列表逐项匹配（顺序自左向右，匹配自底部向上）：</span></div>
+          <div>
+            {% for item in sig.h_results %}
+            <span class="hchip {% if item.matched %}match{% else %}miss{% endif %}"
+              title="{% if item.matched %}匹配到第 {{ item.field_position }} 个字段{% else %}h= 第 {{ item.list_index }} 项未匹配{% endif %}">
+              {{ loop.index }}. {{ item.name or '（空字段名）' }}
+              {% if item.matched %}→ #{{ item.field_position }} ✓{% else %}✗{% endif %}
+            </span>
+            {% endfor %}
+          </div>
+
+          <details>
+            <summary>查看 h= 逐项匹配明细与未覆盖的实际字段副本</summary>
+            <table class="dkim">
+              <thead>
+                <tr><th>h= 序号</th><th>h= 字段名</th><th>匹配结果</th><th>实际字段值（展开折行）</th></tr>
+              </thead>
+              <tbody>
+                {% for item in sig.h_results %}
+                <tr>
+                  <td class="pos">{{ item.list_index }}</td>
+                  <td><code>{{ item.name or '（空字段名）' }}</code></td>
+                  <td class="pos">
+                    {% if item.matched %}<span class="diff-ok">第 {{ item.field_position }} 个字段 ✓</span>
+                    {% else %}<span class="time-bad">未匹配 ✗</span>{% endif %}
+                  </td>
+                  <td class="val">{{ item.value or '—' }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </details>
+          {% endif %}
+
+          {% if sig.unmatched %}
+          <div class="card" style="margin-top:12px;">
+            <h2>未匹配的 h= 项（{{ sig.unmatched_count }}）</h2>
+            <table class="dkim">
+              <thead><tr><th>h= 序号</th><th>字段名</th><th>说明</th></tr></thead>
+              <tbody>
+                {% for u in sig.unmatched %}
+                <tr>
+                  <td class="pos">{{ u.list_index }}</td>
+                  <td><code>{{ u.name or '（空字段名）' }}</code></td>
+                  <td class="time-bad">{{ u.message }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% endif %}
+
+          <div class="card" style="margin-top:12px;">
+            <h2>From / Subject / To / Date 中未被本签名覆盖的实际副本（{{ sig.uncovered_core | length }}）</h2>
+            {% if sig.uncovered_core %}
+            <table class="dkim">
+              <thead><tr><th>字段</th><th>字段位置</th><th>实际值（展开折行）</th></tr></thead>
+              <tbody>
+                {% for f in sig.uncovered_core %}
+                <tr>
+                  <td class="pos">{{ f.field }}</td>
+                  <td class="pos"><span class="time-bad">第 {{ f.position }} 个字段</span></td>
+                  <td class="val">{{ f.value }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            {% else %}
+            <p class="hint" style="margin:0;">From / Subject / To / Date 的所有实际副本均已被本签名覆盖。</p>
+            {% endif %}
+          </div>
+
+          <details>
+            <summary>查看 DKIM-Signature 原文（保留折行）</summary>
+            <pre class="raw">{{ sig.raw }}</pre>
+          </details>
+        </div>
+        {% endfor %}
+
+        <p class="dkim-notice">{{ dkim.notice }}</p>
+        <p class="legend">
+          审计口径：复用折行展开解析，逐条读取每条 <code>DKIM-Signature</code> 的
+          <code>h=</code> 列表；每条签名独立处理，自左向右遍历 <code>h=</code> 项，
+          每项自头部<strong>底部向上</strong>取第一个同名且尚未被本签名使用的实际字段
+          （RFC 6376：重复字段名不按集合合并，多副本同名头从最新一条开始占用）。
+          当前被审计的 DKIM-Signature 自身不参与匹配；字段位置按头部出现先后从 1 计数。
+        </p>
+      {% endif %}
+    {% endif %}
+  {% endif %}
+
   {% if batch %}
     {% if batch.error %}
       <div class="banner">{{ batch.error }}</div>
-    {% else %}
-      <h2 style="font-size:18px;">慢段归因结果（按中位耗时从慢到快）</h2>
+    {% else %}      <h2 style="font-size:18px;">慢段归因结果（按中位耗时从慢到快）</h2>
       <div class="stats">
         <div class="stat"><div class="num">{{ batch.analyzed_count }} / {{ batch.message_count }}</div><div class="label">有效分析邮件 / 提交邮件</div></div>
         <div class="stat"><div class="num">{{ batch.segment_count }}</div><div class="label">慢段（相邻节点对）</div></div>
@@ -653,6 +840,15 @@
   document.getElementById('clearArc').addEventListener('click', () => {
     taArc.value = '';
     taArc.focus();
+  });
+
+  const taDkim = document.getElementById('headers_dkim');
+  document.getElementById('fillDkimSample').addEventListener('click', () => {
+    taDkim.value = {{ sample_dkim | tojson }};
+  });
+  document.getElementById('clearDkim').addEventListener('click', () => {
+    taDkim.value = '';
+    taDkim.focus();
   });
 
   // 单封邮件脱敏分享：POST 当前“头部 A”到 /api/analyze/share，
